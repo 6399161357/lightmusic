@@ -5,23 +5,14 @@ import random
 import psutil
 import subprocess
 import sys
+import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatMemberUpdated, VoiceChatStarted
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired
-
-# PyTgCalls compatibility
-try:
-    from pytgcalls import PyTgCalls
-    from pytgcalls.types import AudioQuality, AudioParameters, HighQualityAudio
-except ImportError:
-    # Fallback for older versions
-    from pytgcalls import PyTgCalls
-    from pytgcalls.types import AudioQuality, AudioParameters
-    HighQualityAudio = AudioQuality.HIGH
 
 from pymongo import MongoClient
 import yt_dlp
@@ -71,7 +62,6 @@ AUDIO_QUALITY = int(os.getenv("AUDIO_QUALITY", "320"))
 # ==========================================
 bot = Client("midnight_music", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 assistant = Client("assistant", session_string=STRING_SESSION, api_id=API_ID, api_hash=API_HASH)
-call = PyTgCalls(assistant)
 
 # Database
 mongo = MongoClient(MONGO_DB_URI)
@@ -112,10 +102,60 @@ ydl_opts = {
 }
 
 # ==========================================
+# VOICE CHAT FUNCTIONS
+# ==========================================
+
+async def join_vc(chat_id):
+    """Join voice chat"""
+    try:
+        await assistant.join_chat(chat_id)
+        await assistant.join_voice_chat(chat_id)
+        return True
+    except Exception as e:
+        print(f"Error joining VC: {e}")
+        return False
+
+async def leave_vc(chat_id):
+    """Leave voice chat"""
+    try:
+        await assistant.leave_voice_chat(chat_id)
+        return True
+    except Exception as e:
+        print(f"Error leaving VC: {e}")
+        return False
+
+async def play_audio(chat_id, audio_url, title):
+    """Play audio in voice chat"""
+    try:
+        # Download audio using yt-dlp
+        audio_file = f"audio_{int(time.time())}.m4a"
+        ydl_opts_download = {
+            'format': 'bestaudio/best',
+            'cookiefile': COOKIE_FILE,
+            'outtmpl': audio_file,
+            'quiet': True,
+            'no_warnings': True,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'm4a',
+                'preferredquality': '320',
+            }],
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts_download) as ydl:
+            ydl.download([audio_url])
+        
+        # Play audio in voice chat
+        await assistant.play_voice_chat(chat_id, audio_file)
+        return True
+    except Exception as e:
+        print(f"Error playing audio: {e}")
+        return False
+
+# ==========================================
 # KEYBOARDS
 # ==========================================
 async def get_start_menu():
-    """Start menu with exact colors"""
     return InlineKeyboardMarkup(
         [
             [
@@ -148,7 +188,6 @@ async def get_start_menu():
     )
 
 async def get_ping_menu():
-    """Ping menu"""
     return InlineKeyboardMarkup(
         [
             [
@@ -171,17 +210,16 @@ async def get_ping_menu():
     )
 
 async def get_control_buttons():
-    """Control buttons"""
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    "Play",
-                    callback_data="play",
-                ),
-                InlineKeyboardButton(
                     "Pause",
                     callback_data="pause",
+                ),
+                InlineKeyboardButton(
+                    "Resume",
+                    callback_data="resume",
                 ),
                 InlineKeyboardButton(
                     "Stop",
@@ -295,13 +333,11 @@ async def help_command(client, message):
 # ==========================================
 @bot.on_message(filters.command("ping"))
 async def ping_command(client, message):
-    # Calculate uptime
     uptime_delta = datetime.now() - BOT_START_TIME
     hours, remainder = divmod(uptime_delta.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     uptime_str = f"{hours}h: {minutes}m: {seconds}s"
     
-    # Get system stats
     try:
         cpu_percent = psutil.cpu_percent()
         ram = psutil.virtual_memory()
@@ -312,17 +348,10 @@ async def ping_command(client, message):
         ram_used = 0
         ram_total = 0
     
-    # Get ping
-    try:
-        ping_value = round(call.ping, 2) if hasattr(call, 'ping') else 0.01
-    except:
-        ping_value = 0.01
-    
     ping_text = (
         "**PONG**\n\n"
-        f"▸ LATENCY: `{ping_value}ms`\n"
+        f"▸ LATENCY: `{(time.time() - BOT_START_TIME.timestamp()) * 1000:.2f}ms`\n"
         f"▸ UPTIME: `{uptime_str}`\n"
-        f"▸ PYTGCALLS: `{ping_value}ms`\n"
         f"▸ RAM: `{ram_used:.1f}GB / {ram_total:.1f}GB`\n"
         f"▸ CPU: `{cpu_percent:.1f}%`"
     )
@@ -362,14 +391,6 @@ async def play_command(client, message):
     
     query = " ".join(message.command[1:]) if len(message.command) > 1 else message.reply_to_message.text
     
-    # Check if cookies file exists
-    if not os.path.exists(COOKIE_FILE):
-        await message.reply_text(
-            "**⚠️ Warning**\n\n▸ Cookies file not found!\n▸ Some videos may have ads.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # Downloading emoji
     download_emoji = f"![tg://emoji?id={PREMIUM_EMOJI_DOWNLOAD}](tg://emoji?id={PREMIUM_EMOJI_DOWNLOAD})" if PREMIUM_EMOJI_DOWNLOAD else "🎧"
     
     downloading_msg = await message.reply_text(
@@ -377,9 +398,9 @@ async def play_command(client, message):
         parse_mode=ParseMode.MARKDOWN
     )
     
+    # Join VC
     try:
-        if not call.is_connected:
-            await call.join(message.chat.id)
+        await join_vc(message.chat.id)
     except Exception as e:
         await downloading_msg.edit_text(
             f"**❌ Error**\n\n▸ {str(e)}",
@@ -450,13 +471,8 @@ async def play_command(client, message):
                 "added_at": datetime.now()
             })
             
-            await call.play(
-                url,
-                audio_parameters=AudioParameters(
-                    bitrate=AudioQuality.HIGH,
-                    volume=100
-                )
-            )
+            # Play audio
+            await play_audio(message.chat.id, url, title)
             
         except Exception as e:
             await downloading_msg.edit_text(
@@ -465,68 +481,80 @@ async def play_command(client, message):
             )
 
 # ==========================================
-# OTHER COMMANDS
+# PAUSE COMMAND
 # ==========================================
 @bot.on_message(filters.command("pause"))
 async def pause_command(client, message):
-    if call.is_playing:
-        await call.pause()
+    try:
+        await assistant.pause_voice_chat(message.chat.id)
         await message.reply_text(
             "**⏸️ Paused**\n\n▸ Playback has been paused\n▸ Use `/resume` to continue",
             reply_markup=await get_control_buttons(),
             parse_mode=ParseMode.MARKDOWN
         )
-    else:
+    except Exception as e:
         await message.reply_text(
-            "**❌ Error**\n\n▸ Nothing is currently playing!",
+            f"**❌ Error**\n\n▸ {str(e)}",
             parse_mode=ParseMode.MARKDOWN
         )
 
+# ==========================================
+# RESUME COMMAND
+# ==========================================
 @bot.on_message(filters.command("resume"))
 async def resume_command(client, message):
-    if call.is_paused:
-        await call.resume()
+    try:
+        await assistant.resume_voice_chat(message.chat.id)
         await message.reply_text(
             "**▶️ Resumed**\n\n▸ Playback has been resumed\n▸ Enjoy your music! 🎵",
             reply_markup=await get_control_buttons(),
             parse_mode=ParseMode.MARKDOWN
         )
-    else:
+    except Exception as e:
         await message.reply_text(
-            "**❌ Error**\n\n▸ Nothing is paused!",
+            f"**❌ Error**\n\n▸ {str(e)}",
             parse_mode=ParseMode.MARKDOWN
         )
 
+# ==========================================
+# STOP COMMAND
+# ==========================================
 @bot.on_message(filters.command("stop"))
 async def stop_command(client, message):
-    if call.is_connected:
-        await call.leave()
+    try:
+        await leave_vc(message.chat.id)
         queue_db.delete_many({"chat_id": message.chat.id})
         await message.reply_text(
             "**⏹️ Stopped**\n\n▸ Playback has been stopped\n▸ Left the voice chat\n▸ Queue cleared",
             parse_mode=ParseMode.MARKDOWN
         )
-    else:
+    except Exception as e:
         await message.reply_text(
-            "**❌ Error**\n\n▸ Not in a voice chat!",
+            f"**❌ Error**\n\n▸ {str(e)}",
             parse_mode=ParseMode.MARKDOWN
         )
 
+# ==========================================
+# SKIP COMMAND
+# ==========================================
 @bot.on_message(filters.command("skip"))
 async def skip_command(client, message):
-    if call.is_playing:
-        await call.skip()
+    try:
+        await assistant.stop_voice_chat(message.chat.id)
         await message.reply_text(
             "**⏭️ Skipped**\n\n▸ Current song has been skipped",
             reply_markup=await get_control_buttons(),
             parse_mode=ParseMode.MARKDOWN
         )
-    else:
+    except Exception as e:
         await message.reply_text(
-            "**❌ Error**\n\n▸ Nothing to skip!",
+            f"**❌ Error**\n\n▸ {str(e)}",
             parse_mode=ParseMode.MARKDOWN
         )
 
+# ==========================================
+# QUEUE COMMAND
+# ==========================================
 @bot.on_message(filters.command("queue"))
 async def queue_command(client, message):
     queue_items = list(queue_db.find({"chat_id": message.chat.id}))
@@ -550,54 +578,52 @@ async def queue_command(client, message):
         parse_mode=ParseMode.MARKDOWN
     )
 
+# ==========================================
+# NOW PLAYING COMMAND
+# ==========================================
 @bot.on_message(filters.command("now"))
 async def now_command(client, message):
-    if call.is_playing or call.is_paused:
-        try:
-            current = call.current_track
-            if current:
-                queue_item = queue_db.find_one({"chat_id": message.chat.id})
-                thumbnail = queue_item.get("thumbnail", "") if queue_item else ""
-                
-                if thumbnail:
-                    try:
-                        await message.reply_photo(
-                            photo=thumbnail,
-                            caption=(
-                                f"**🎵 Now Playing**\n\n"
-                                f"▸ {current.title}\n"
-                                f"▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}"
-                            ),
-                            reply_markup=await get_control_buttons()
-                        )
-                    except:
-                        await message.reply_text(
-                            f"**🎵 Now Playing**\n\n▸ {current.title}\n▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}",
-                            reply_markup=await get_control_buttons(),
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                else:
+    try:
+        queue_item = queue_db.find_one({"chat_id": message.chat.id})
+        if queue_item:
+            thumbnail = queue_item.get("thumbnail", "")
+            if thumbnail:
+                try:
+                    await message.reply_photo(
+                        photo=thumbnail,
+                        caption=(
+                            f"**🎵 Now Playing**\n\n"
+                            f"▸ {queue_item['title']}\n"
+                            f"▸ Status: ▶️ Playing"
+                        ),
+                        reply_markup=await get_control_buttons()
+                    )
+                except:
                     await message.reply_text(
-                        f"**🎵 Now Playing**\n\n▸ {current.title}\n▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}",
+                        f"**🎵 Now Playing**\n\n▸ {queue_item['title']}\n▸ Status: ▶️ Playing",
                         reply_markup=await get_control_buttons(),
                         parse_mode=ParseMode.MARKDOWN
                     )
             else:
                 await message.reply_text(
-                    "**❌ Error**\n\n▸ No track is currently playing!",
+                    f"**🎵 Now Playing**\n\n▸ {queue_item['title']}\n▸ Status: ▶️ Playing",
+                    reply_markup=await get_control_buttons(),
                     parse_mode=ParseMode.MARKDOWN
                 )
-        except:
+        else:
             await message.reply_text(
                 "**❌ Error**\n\n▸ No track is currently playing!",
                 parse_mode=ParseMode.MARKDOWN
             )
-    else:
+    except:
         await message.reply_text(
-            "**❌ Error**\n\n▸ Nothing is playing!",
+            "**❌ Error**\n\n▸ No track is currently playing!",
             parse_mode=ParseMode.MARKDOWN
         )
 
+# ==========================================
+# SEARCH COMMAND
+# ==========================================
 @bot.on_message(filters.command("search"))
 async def search_command(client, message):
     if len(message.command) < 2:
@@ -643,6 +669,9 @@ async def search_command(client, message):
                 parse_mode=ParseMode.MARKDOWN
             )
 
+# ==========================================
+# VOLUME COMMAND
+# ==========================================
 @bot.on_message(filters.command("volume"))
 async def volume_command(client, message):
     if len(message.command) < 2:
@@ -661,7 +690,7 @@ async def volume_command(client, message):
             )
             return
         
-        await call.set_volume(volume)
+        await assistant.set_voice_chat_volume(message.chat.id, volume)
         await message.reply_text(
             f"**🔊 Volume Set**\n\n▸ Volume has been set to **{volume}%**",
             parse_mode=ParseMode.MARKDOWN
@@ -683,10 +712,10 @@ async def handle_callback(client: Client, callback_query: CallbackQuery):
         await help_command(client, callback_query.message)
     elif data == "back":
         await start_command(client, callback_query.message)
-    elif data == "play":
-        await callback_query.answer("▶️ Resuming playback...", show_alert=False)
     elif data == "pause":
         await pause_command(client, callback_query.message)
+    elif data == "resume":
+        await resume_command(client, callback_query.message)
     elif data == "stop":
         await stop_command(client, callback_query.message)
     elif data == "skip":
@@ -707,10 +736,8 @@ async def main():
     await assistant.start()
     print("🤖 Starting Bot...")
     await bot.start()
-    print("🎤 Starting Voice Calls...")
-    await call.start()
     print(f"✅ {BOT_NAME} is ready!")
-    print(f"🚀 Ultra-fast: ON | No Ads: {'Yes' if os.path.exists(COOKIE_FILE) else 'No'} | Quality: {AUDIO_QUALITY}kbps")
+    print(f"🚀 No Ads: {'Yes' if os.path.exists(COOKIE_FILE) else 'No'} | Quality: {AUDIO_QUALITY}kbps")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
