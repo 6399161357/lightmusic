@@ -3,6 +3,8 @@ import asyncio
 import time
 import random
 import psutil
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -11,8 +13,15 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 from pyrogram.enums import ParseMode, ChatType, ChatMemberStatus
 from pyrogram.errors import UserNotParticipant, ChatAdminRequired
 
-from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioQuality, AudioParameters, HighQualityAudio
+# PyTgCalls compatibility
+try:
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import AudioQuality, AudioParameters, HighQualityAudio
+except ImportError:
+    # Fallback for older versions
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import AudioQuality, AudioParameters
+    HighQualityAudio = AudioQuality.HIGH
 
 from pymongo import MongoClient
 import yt_dlp
@@ -113,35 +122,26 @@ async def get_start_menu():
                 InlineKeyboardButton(
                     "Add me to your group",
                     url=ADD_GROUP_LINK,
-                    style="primary"
                 )
             ],
             [
                 InlineKeyboardButton(
                     "Help",
                     callback_data="help",
-                    style="success",
-                    icon_custom_emoji_id=PREMIUM_EMOJI_HELP if PREMIUM_EMOJI_HELP else None
                 )
             ],
             [
                 InlineKeyboardButton(
                     "Support",
                     url=SUPPORT_LINK,
-                    style="primary",
-                    icon_custom_emoji_id=PREMIUM_EMOJI_SUPPORT if PREMIUM_EMOJI_SUPPORT else None
                 ),
                 InlineKeyboardButton(
                     "Channel",
                     url=CHANNEL_LINK,
-                    style="primary",
-                    icon_custom_emoji_id=PREMIUM_EMOJI_CHANNEL if PREMIUM_EMOJI_CHANNEL else None
                 ),
                 InlineKeyboardButton(
                     "Owner",
                     url=f"https://t.me/{OWNER_USERNAME.replace('@', '')}",
-                    style="danger",
-                    icon_custom_emoji_id=PREMIUM_EMOJI_OWNER if PREMIUM_EMOJI_OWNER else None
                 )
             ]
         ]
@@ -155,19 +155,16 @@ async def get_ping_menu():
                 InlineKeyboardButton(
                     "Channel",
                     url=CHANNEL_LINK,
-                    style="primary"
                 ),
                 InlineKeyboardButton(
                     "Support",
                     url=SUPPORT_LINK,
-                    style="primary"
                 )
             ],
             [
                 InlineKeyboardButton(
                     "Add Me to Your Group",
                     url=ADD_GROUP_LINK,
-                    style="primary"
                 )
             ]
         ]
@@ -181,36 +178,28 @@ async def get_control_buttons():
                 InlineKeyboardButton(
                     "Play",
                     callback_data="play",
-                    style="success",
-                    icon_custom_emoji_id=PREMIUM_EMOJI_PLAY if PREMIUM_EMOJI_PLAY else None
                 ),
                 InlineKeyboardButton(
                     "Pause",
                     callback_data="pause",
-                    style="primary"
                 ),
                 InlineKeyboardButton(
                     "Stop",
                     callback_data="stop",
-                    style="danger"
                 ),
                 InlineKeyboardButton(
                     "Skip",
                     callback_data="skip",
-                    style="primary"
                 )
             ],
             [
                 InlineKeyboardButton(
                     "Queue",
                     callback_data="queue",
-                    style="primary"
                 ),
                 InlineKeyboardButton(
                     "Now Playing",
                     callback_data="now",
-                    style="primary",
-                    icon_custom_emoji_id=PREMIUM_EMOJI_NOW if PREMIUM_EMOJI_NOW else None
                 )
             ]
         ]
@@ -296,7 +285,7 @@ async def help_command(client, message):
     await message.reply_text(
         help_text,
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Back", callback_data="back", style="primary")]]
+            [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
         ),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -313,16 +302,27 @@ async def ping_command(client, message):
     uptime_str = f"{hours}h: {minutes}m: {seconds}s"
     
     # Get system stats
-    cpu_percent = psutil.cpu_percent()
-    ram = psutil.virtual_memory()
-    ram_used = ram.used / (1024**3)
-    ram_total = ram.total / (1024**3)
+    try:
+        cpu_percent = psutil.cpu_percent()
+        ram = psutil.virtual_memory()
+        ram_used = ram.used / (1024**3)
+        ram_total = ram.total / (1024**3)
+    except:
+        cpu_percent = 0
+        ram_used = 0
+        ram_total = 0
+    
+    # Get ping
+    try:
+        ping_value = round(call.ping, 2) if hasattr(call, 'ping') else 0.01
+    except:
+        ping_value = 0.01
     
     ping_text = (
         "**PONG**\n\n"
-        f"▸ LATENCY: `{round(call.ping, 2)}ms`\n"
+        f"▸ LATENCY: `{ping_value}ms`\n"
         f"▸ UPTIME: `{uptime_str}`\n"
-        f"▸ PYTGCALLS: `{round(call.ping, 2)}ms`\n"
+        f"▸ PYTGCALLS: `{ping_value}ms`\n"
         f"▸ RAM: `{ram_used:.1f}GB / {ram_total:.1f}GB`\n"
         f"▸ CPU: `{cpu_percent:.1f}%`"
     )
@@ -362,6 +362,13 @@ async def play_command(client, message):
     
     query = " ".join(message.command[1:]) if len(message.command) > 1 else message.reply_to_message.text
     
+    # Check if cookies file exists
+    if not os.path.exists(COOKIE_FILE):
+        await message.reply_text(
+            "**⚠️ Warning**\n\n▸ Cookies file not found!\n▸ Some videos may have ads.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
     # Downloading emoji
     download_emoji = f"![tg://emoji?id={PREMIUM_EMOJI_DOWNLOAD}](tg://emoji?id={PREMIUM_EMOJI_DOWNLOAD})" if PREMIUM_EMOJI_DOWNLOAD else "🎧"
     
@@ -399,7 +406,7 @@ async def play_command(client, message):
             views = song.get("view_count", 0)
             
             mins, secs = divmod(duration, 60)
-            duration_str = f"{mins}:{secs:02d}"
+            duration_str = f"{mins}:{secs:02d}" if mins > 0 else f"0:{secs:02d}"
             
             await downloading_msg.delete()
             
@@ -446,7 +453,7 @@ async def play_command(client, message):
             await call.play(
                 url,
                 audio_parameters=AudioParameters(
-                    bitrate=HighQualityAudio,
+                    bitrate=AudioQuality.HIGH,
                     volume=100
                 )
             )
@@ -546,23 +553,30 @@ async def queue_command(client, message):
 @bot.on_message(filters.command("now"))
 async def now_command(client, message):
     if call.is_playing or call.is_paused:
-        current = call.current_track
-        if current:
-            queue_item = queue_db.find_one({"chat_id": message.chat.id})
-            thumbnail = queue_item.get("thumbnail", "") if queue_item else ""
-            
-            if thumbnail:
-                try:
-                    await message.reply_photo(
-                        photo=thumbnail,
-                        caption=(
-                            f"**🎵 Now Playing**\n\n"
-                            f"▸ {current.title}\n"
-                            f"▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}"
-                        ),
-                        reply_markup=await get_control_buttons()
-                    )
-                except:
+        try:
+            current = call.current_track
+            if current:
+                queue_item = queue_db.find_one({"chat_id": message.chat.id})
+                thumbnail = queue_item.get("thumbnail", "") if queue_item else ""
+                
+                if thumbnail:
+                    try:
+                        await message.reply_photo(
+                            photo=thumbnail,
+                            caption=(
+                                f"**🎵 Now Playing**\n\n"
+                                f"▸ {current.title}\n"
+                                f"▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}"
+                            ),
+                            reply_markup=await get_control_buttons()
+                        )
+                    except:
+                        await message.reply_text(
+                            f"**🎵 Now Playing**\n\n▸ {current.title}\n▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}",
+                            reply_markup=await get_control_buttons(),
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                else:
                     await message.reply_text(
                         f"**🎵 Now Playing**\n\n▸ {current.title}\n▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}",
                         reply_markup=await get_control_buttons(),
@@ -570,11 +584,10 @@ async def now_command(client, message):
                     )
             else:
                 await message.reply_text(
-                    f"**🎵 Now Playing**\n\n▸ {current.title}\n▸ Status: {'▶️ Playing' if call.is_playing else '⏸️ Paused'}",
-                    reply_markup=await get_control_buttons(),
+                    "**❌ Error**\n\n▸ No track is currently playing!",
                     parse_mode=ParseMode.MARKDOWN
                 )
-        else:
+        except:
             await message.reply_text(
                 "**❌ Error**\n\n▸ No track is currently playing!",
                 parse_mode=ParseMode.MARKDOWN
@@ -697,7 +710,7 @@ async def main():
     print("🎤 Starting Voice Calls...")
     await call.start()
     print(f"✅ {BOT_NAME} is ready!")
-    print(f"🚀 Ultra-fast: ON | No Ads: ON | Quality: {AUDIO_QUALITY}kbps")
+    print(f"🚀 Ultra-fast: ON | No Ads: {'Yes' if os.path.exists(COOKIE_FILE) else 'No'} | Quality: {AUDIO_QUALITY}kbps")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
